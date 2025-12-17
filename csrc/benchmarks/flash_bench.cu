@@ -126,6 +126,13 @@ int main() {
     auto* fGateOutputMemPtr = static_cast<float*>(gateOutputMemPtr);
     auto* fMoeOutputMemPtr = static_cast<float*>(moeOutputMemPtr);
 
+    // Generate common expert weights [E * 2 * P * H]
+    std::vector<float> expertWeights(E * 2 * P * H);
+    thrust::default_random_engine rng(131);
+    thrust::normal_distribution<float> dist(0, 0.15);
+    thrust::generate(expertWeights.data(), expertWeights.data() + expertWeights.size(),
+                [&] { return dist(rng); });
+
     {
         #if FLASHMOE_NVTX
         flashmoe::flashmoeRange forwardRange{"Host Data Prep"};
@@ -136,17 +143,11 @@ int main() {
         thrust::generate(fHp, fHp + aZ, [&] { return dist(rng); });
         // gate weights
         thrust::generate(fHp + aZ, fHp + aZ + E * H, [&] { return dist(rng); });
-        // Expert weights
-        // loop for number of experts
-        for (uint i = 0; i < nLx; ++i) {
-            // expert up
-            thrust::generate(fHp + gwZ + i * (P * H), fHp + gwZ + (i + 1) * (P * H),
-                [&] { return dist(rng); });
-            thrust::generate(fHp + bZ + i * (P * H), fHp + bZ + (i + 1) * (P * H),
-                [&] { return dist(rng); });
-        }
         // bias
         std::ranges::fill(fHp + b2Z, fHp + dZ, 0.0f);
+
+        // expert copy own weights
+        std::memcpy(fHp + gwZ, expertWeights.data() + rank * 2 * nLx * (P * H), 2 * nLx * (P * H) * sizeof(float));
         constexpr cutlass::NumericConverter<Element, float> conv{};
         for (uint i = 0; i < dZ; ++i) {
             eHp[i] = conv(fHp[i]);
@@ -171,28 +172,14 @@ int main() {
 
     printf("===== FlashMoE reference execution =====\n");
     {
+        auto rankCount = flashmoe::hostBookkeeping.world;
         std::vector<float> activations(S * H);
         std::vector<float> gateWeights(PX * H);
-        std::vector<float> expertWeights(2 * E * P * H);
         std::vector<float> gateOutput(S * PX, 0);
         std::vector<float> moeOutput(S * H, 0);
 
         std::memcpy(activations.data(), fHp, (S * H) * sizeof(float));
         std::memcpy(gateWeights.data(), fHp + S * H, (PX * H) * sizeof(float));
-
-        {
-            thrust::normal_distribution<float> dist(0, 5);
-            for (size_t rank = 0 ; rank < 8; ++rank) {
-                thrust::default_random_engine rng(47 * (rank + 42));
-                for (uint i = 0; i < E / 8; ++i) {
-                    // expert up
-                    thrust::generate(expertWeights.data() + i * (P * H), expertWeights.data() + (i + 1) * (P * H),
-                        [&] { return dist(rng); });
-                    thrust::generate(expertWeights.data() + (i + 1) * (P * H), expertWeights.data() + (i + 2) * (P * H),
-                        [&] { return dist(rng); });
-                }
-            }
-        }
 
         printf("Forward for Rank: %u \n", flashmoe::hostBookkeeping.rank);
         flashmoe::forwardCPU<S, H, P, PX, E>(activations, gateWeights, expertWeights, gateOutput, moeOutput);

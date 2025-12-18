@@ -108,6 +108,12 @@ find_package(NVSHMEM REQUIRED HINTS "$ENV{NVSHMEM_HOME}/lib/cmake/nvshmem")
 # cuBLASDx
 find_package(mathdx REQUIRED COMPONENTS cublasdx CONFIG)
 
+find_package(OpenMP REQUIRED)
+if (OPENMP_FOUND)
+    set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
+    set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
+    set (CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${OpenMP_EXE_LINKER_FLAGS}")
+endif()
 
 # Pre-compile constants
 # Read JSON file content
@@ -160,7 +166,7 @@ message(STATUS "vocab_size: ${VOCAB_SIZE_V}")
 
 function(flash_target_common tgt)
     target_link_libraries(${tgt} PRIVATE CUDA::cudart CUDA::cuda_driver CUDA::nvtx3)
-    target_link_libraries(${tgt} PRIVATE atomic)
+    target_link_libraries(${tgt} PRIVATE atomic OpenMP::OpenMP_CXX)
     if(CCCL_ADDED)
         target_link_libraries(${tgt} PRIVATE CCCL::CCCL)
     endif()

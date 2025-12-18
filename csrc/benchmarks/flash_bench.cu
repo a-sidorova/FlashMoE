@@ -63,27 +63,29 @@ void runOS() {
     FLASHMOE_CHECK_CUDA(cudaMemcpyAsync(p, eHp, sizeof(Element) * dZ,
         cudaMemcpyHostToDevice,
         flashmoe::flashmoeStream));
-    printf("epRank: %u : %f %f %f %f %f %f %f %f\n", flashmoe::hostBookkeeping.rank, *(fHp), *(fHp + 1), *(fHp + 2), *(fHp + 3), *(fHp + 4), *(fHp + 5), *(fHp + 6), *(fHp + 7));
-
     float timed = 0;
     printf("forwardHost\n");
     flashmoe::moe::forwardHost(p, p + dZ * sizeof(Element));
-    //printf("epRank: %u took %.2fms\n", flashmoe::hostBookkeeping.rank, timed);
-    auto* hO = std::calloc(S * PX + S * H, sizeof(float));
-    auto* fHo = static_cast<float*>(hO);
-    auto* __restrict__ eHo = static_cast<Element*>(hO);
-    FLASHMOE_CHECK_CUDA(cudaMemcpy(eHo, p + dZ * sizeof(Element), sizeof(Element) * (S * PX + S * H),
-        cudaMemcpyDeviceToHost));
-    // Wait for the async D2H copy to complete before reading host buffer.
-    //FLASHMOE_CHECK_CUDA(cudaStreamSynchronize(flashmoe::flashmoeStream));
-    //fHo = fHo + S * PX;
-    printf("epRank: %u : %f %f %f %f %f %f %f %f\n", flashmoe::hostBookkeeping.rank, *(fHo), *(fHo + 1), *(fHo + 2), *(fHo + 3), *(fHo + 4), *(fHo + 5), *(fHo + 6), *(fHo + 7));
 
-    std::cout << std::endl;
+    auto gateOutputSize = gZ - dZ;
+    auto moeOutputSize = cZ - gZ;
+    auto gateOutputMemPtr = std::calloc(gateOutputSize, sizeof(float));
+    auto moeOutputMemPtr = std::calloc(moeOutputSize, sizeof(float));
+
+    auto* fGateOutputMemPtr = static_cast<float*>(gateOutputMemPtr);
+    auto* fMoeOutputMemPtr = static_cast<float*>(moeOutputMemPtr);
+
+    FLASHMOE_CHECK_CUDA(cudaStreamSynchronize(flashmoe::flashmoeStream));
+    FLASHMOE_CHECK_CUDA(cudaMemcpy(fGateOutputMemPtr, p + dZ * sizeof(Element), gateOutputSize * sizeof(float),
+        cudaMemcpyDeviceToHost));
+    FLASHMOE_CHECK_CUDA(cudaMemcpy(fMoeOutputMemPtr, p + gZ * sizeof(Element), moeOutputSize * sizeof(float),
+        cudaMemcpyDeviceToHost));
+
     FLASHMOE_CHECK_CUDA(cudaPeekAtLastError());
     flashmoe::finalize();
     std::free(hP);
-    std::free(hO);
+    std::free(fGateOutputMemPtr);
+    std::free(fMoeOutputMemPtr);
 }
 
 int main() {
@@ -114,10 +116,6 @@ int main() {
     auto* fHp = static_cast<float*>(hP);
     auto* __restrict__ eHp = static_cast<Element*>(hP);
 
-    auto* hO = std::calloc(S * PX + S * H, sizeof(float));
-    auto* fHo = static_cast<float*>(hO);
-    auto* __restrict__ eHo = static_cast<Element*>(hO);
-
     auto gateOutputSize = gZ - dZ;
     auto moeOutputSize = cZ - gZ;
     auto gateOutputMemPtr = std::calloc(gateOutputSize, sizeof(float));
@@ -125,6 +123,11 @@ int main() {
 
     auto* fGateOutputMemPtr = static_cast<float*>(gateOutputMemPtr);
     auto* fMoeOutputMemPtr = static_cast<float*>(moeOutputMemPtr);
+
+    auto refGateOutput = std::vector<float>(S * PX, 0);
+    auto refMoeOutput = std::vector<float>(S * H, 0);
+
+    assert(nLx == flashmoe::hostBookkeeping.world);
 
     // Generate common expert weights [E * 2 * P * H]
     std::vector<float> expertWeights(E * 2 * P * H);
@@ -146,8 +149,11 @@ int main() {
         // bias
         std::ranges::fill(fHp + b2Z, fHp + dZ, 0.0f);
 
-        // expert copy own weights
-        std::memcpy(fHp + gwZ, expertWeights.data() + rank * 2 * nLx * (P * H), 2 * nLx * (P * H) * sizeof(float));
+        // copy own expert weights
+        for (uint i = 0; i < nLx; ++i) {
+            std::memcpy(fHp + gwZ + i * (P * H), expertWeights.data() + (i + nLx * rank) * 2 * P * H, (P * H) * sizeof(float));
+            std::memcpy(fHp + bZ + i * (P * H), expertWeights.data() + (i + nLx * rank) * 2 * P * H + P * H, (P * H) * sizeof(float));
+        }
         constexpr cutlass::NumericConverter<Element, float> conv{};
         for (uint i = 0; i < dZ; ++i) {
             eHp[i] = conv(fHp[i]);
@@ -175,31 +181,46 @@ int main() {
         auto rankCount = flashmoe::hostBookkeeping.world;
         std::vector<float> activations(S * H);
         std::vector<float> gateWeights(PX * H);
-        std::vector<float> gateOutput(S * PX, 0);
-        std::vector<float> moeOutput(S * H, 0);
 
         std::memcpy(activations.data(), fHp, (S * H) * sizeof(float));
         std::memcpy(gateWeights.data(), fHp + S * H, (PX * H) * sizeof(float));
 
         printf("Forward for Rank: %u \n", flashmoe::hostBookkeeping.rank);
-        flashmoe::forwardCPU<S, H, P, PX, E>(activations, gateWeights, expertWeights, gateOutput, moeOutput);
+        flashmoe::forwardCPU<H, P, PX, E>(activations, gateWeights, expertWeights, refGateOutput, refMoeOutput, S);
+    }
 
+    printf("===== Validation =====\n");
+    {
         bool failed = false;
         for (size_t i = 0; i < gateOutputSize; ++i) {
-            if (std::abs(fGateOutputMemPtr[i] - gateOutput[i]) > 1e3) {
+            if (std::abs(fGateOutputMemPtr[i] - refGateOutput[i]) > 1e-2) {
                 printf("Elementwise difference of softmax (gate + softmax) outputs for Rank: %u: Error at index %zu: %f vs %f\n",
-                        flashmoe::hostBookkeeping.rank, i, fGateOutputMemPtr[i], gateOutput[i]);
+                        flashmoe::hostBookkeeping.rank, i, fGateOutputMemPtr[i], refGateOutput[i]);
                 failed = true;
                 break;
             }
         }
         if (!failed) {
-            printf("Elementwise difference has not been found for Rank: %u!\n", flashmoe::hostBookkeeping.rank);
+            printf("Elementwise difference between softmax (gate + softmax) outputs and reference has not been found for Rank: %u!\n", flashmoe::hostBookkeeping.rank);
+        }
+
+        failed = false;
+        for (size_t i = 0; i < moeOutputSize; ++i) {
+            if (std::abs(fMoeOutputMemPtr[i] - refMoeOutput[i]) > 1e-3) {
+                printf("Elementwise difference of entire MoE outputs for Rank: %u: Error at index %zu: %f vs %f\n",
+                        flashmoe::hostBookkeeping.rank, i, fMoeOutputMemPtr[i], refMoeOutput[i]);
+                failed = true;
+                break;
+            }
+        }
+        if (!failed) {
+            printf("Elementwise difference between MoE outputs and reference has not been found for Rank: %u!\n", flashmoe::hostBookkeeping.rank);
         }
     }
 
     FLASHMOE_CHECK_CUDA(cudaPeekAtLastError());
     flashmoe::finalize();
     std::free(hP);
-    std::free(hO);
+    std::free(fGateOutputMemPtr);
+    std::free(fMoeOutputMemPtr);
 }

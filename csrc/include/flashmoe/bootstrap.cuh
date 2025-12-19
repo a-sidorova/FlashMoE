@@ -337,13 +337,33 @@ namespace flashmoe{
 
         discoverTopology(aP, globalWorld, rank, wAp[rank], wAp);
         auto ePgD = EPG{};
-        // The topology adjacency matrix is ready, let's map devices to optimal cooperative process groups
-        const auto isFeasible = runDecider(&ePgD, experts, workers, ePWorkers, dTg, pT, pTs, ePs, ePsX,
-            scratch, aP, wAp, rank, globalWorld);
-        if (!isFeasible) {
-            cleanup();
-            FLASHMOE_ASSERT(isFeasible, "Insufficient Memory for Experts");
+        imposeStrategy(&ePgD, pT, ePs, rank, globalWorld);
+
+        // keep dTg / pTs consistent with the trivial grouping
+        for (uint i = 0; i < globalWorld; ++i) {
+            dTg[i] = i;   // each rank its own group
+            pTs[i] = i;   // identity permutation
         }
+
+        if (rank == 0) { // or remove the guard if you want every rank to log its own view
+            std::vector<std::vector<uint>> perRank(globalWorld);
+            for (uint i = 0; i < E; ++i) {
+                const auto epLocal = ePs[i];
+                const auto global = pT[epLocal];
+                perRank[global].push_back(i);
+            }
+            for (uint r = 0; r < globalWorld; ++r) {
+                fmt::print("Rank {} experts: {}\n", r, perRank[r]);
+            }
+        }
+
+        // // The topology adjacency matrix is ready, let's map devices to optimal cooperative process groups
+        // const auto isFeasible = runDecider(&ePgD, experts, workers, ePWorkers, dTg, pT, pTs, ePs, ePsX,
+        //     scratch, aP, wAp, rank, globalWorld);
+        // if (!isFeasible) {
+        //     cleanup();
+        //     FLASHMOE_ASSERT(isFeasible, "Insufficient Memory for Experts");
+        // }
         // Now allocate memory
         const auto heapElems = STAGES * CELLS * ePgD.epWorldM * ePgD.expertSlots * ACC::pEC::value *
             ACC::H::value;

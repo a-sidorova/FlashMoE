@@ -63,8 +63,9 @@ void runOS() {
         cudaMemcpyHostToDevice,
         flashmoe::flashmoeStream));
 
+    printf("Rank: %u, nLx: %u\n", flashmoe::hostBookkeeping.rank, nLx);
+
     flashmoe::moe::forwardHost(p, p + dZ * sizeof(Element));
-    printf("epRank: %u took %.2fms\n", flashmoe::hostBookkeeping.rank);
 
     auto gateOutputSize = gZ - dZ;
     auto moeOutputSize = cZ - gZ;

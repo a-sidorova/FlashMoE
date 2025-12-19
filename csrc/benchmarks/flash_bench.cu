@@ -150,6 +150,7 @@ int main() {
     constexpr auto E = flashmoe::ACC::E::value;
     constexpr auto P = flashmoe::ACC::P::value;
     constexpr auto PX = flashmoe::ACC::PX::value;
+    constexpr auto TK = flashmoe::ACC::TK::value;
     const auto nLx = flashmoe::hostBookkeeping.nLx;
     constexpr unsigned long aZ =  S * H;
     constexpr auto gwZ = aZ + PX * H;
@@ -158,7 +159,8 @@ int main() {
     const auto b2Z =  bZ + nLx * P * H;
     const auto dZ =  b2Z + nLx * (P + H);
     const auto gZ = dZ + S * PX;
-    const auto cZ = gZ + S * H;
+    const auto oZ = gZ + S * H;
+    const auto cZ = oZ + S * (2 * TK);
     cuda::std::byte* p;
     FLASHMOE_CHECK_CUDA(cudaMallocAsync(&p, cZ * sizeof(float), flashmoe::flashmoeStream));
     FLASHMOE_CHECK_CUDA(cudaMemsetAsync(p, 0, cZ * sizeof(float), flashmoe::flashmoeStream));
@@ -168,14 +170,18 @@ int main() {
     auto* __restrict__ eHp = static_cast<Element*>(hP);
 
     auto gateOutputSize = gZ - dZ;
-    auto moeOutputSize = cZ - gZ;
+    auto topkOutputSize = cZ - oZ;
+    auto moeOutputSize = oZ - gZ;
     auto gateOutputMemPtr = std::calloc(gateOutputSize, sizeof(float));
+    auto TopKOutputMemPtr = std::calloc(topkOutputSize, sizeof(float));
     auto moeOutputMemPtr = std::calloc(moeOutputSize, sizeof(float));
 
     auto* fGateOutputMemPtr = static_cast<float*>(gateOutputMemPtr);
+    auto* fTopkOutputMemPtr = static_cast<float*>(TopKOutputMemPtr);
     auto* fMoeOutputMemPtr = static_cast<float*>(moeOutputMemPtr);
 
     auto refGateOutput = std::vector<float>(S * PX, 0);
+    auto refTopkOutput = std::vector<float>(S * (2 * TK), 0);
     auto refMoeOutput = std::vector<float>(S * H, 0);
 
     assert(nLx == flashmoe::hostBookkeeping.world);
@@ -225,6 +231,8 @@ int main() {
             cudaMemcpyDeviceToHost));
         FLASHMOE_CHECK_CUDA(cudaMemcpy(fMoeOutputMemPtr, p + gZ * sizeof(Element), moeOutputSize * sizeof(float),
             cudaMemcpyDeviceToHost));
+        FLASHMOE_CHECK_CUDA(cudaMemcpy(fTopkOutputMemPtr, p + oZ * sizeof(Element), topkOutputSize * sizeof(float),
+            cudaMemcpyDeviceToHost));
 
         printf("Output Gate for epRank %u : %f %f %f %f %f \n", flashmoe::hostBookkeeping.rank,
             fGateOutputMemPtr[0], fGateOutputMemPtr[1], fGateOutputMemPtr[2], fGateOutputMemPtr[3], fGateOutputMemPtr[4]);
@@ -242,7 +250,7 @@ int main() {
         std::memcpy(gateWeights.data(), fHp + S * H, (PX * H) * sizeof(float));
 
         printf("Forward for Rank: %u \n", flashmoe::hostBookkeeping.rank);
-        flashmoe::forwardCPU<H, P, PX, E>(activations, gateWeights, expertWeights, refGateOutput, refMoeOutput, S);
+        flashmoe::forwardCPU<H, P, PX, E>(activations, gateWeights, expertWeights, refGateOutput, refTopkOutput, refMoeOutput, S);
 
         printf("Output Gate for epRank %u : %f %f %f %f %f \n", flashmoe::hostBookkeeping.rank,
             refGateOutput[0], refGateOutput[1], refGateOutput[2], refGateOutput[3], refGateOutput[4]);
@@ -263,6 +271,19 @@ int main() {
         }
         if (!failed) {
             printf("Elementwise difference between softmax (gate + softmax) outputs and reference has not been found for Rank: %u!\n", flashmoe::hostBookkeeping.rank);
+        }
+
+        failed = false;
+        for (size_t i = 0; i < topkOutputSize; ++i) {
+            if (std::abs(fTopkOutputMemPtr[i] - refTopkOutput[i]) > 1e-3) {
+                printf("Elementwise difference of TopK outputs for Rank: %u: Error at index %zu: %f vs %f\n",
+                        flashmoe::hostBookkeeping.rank, i, fTopkOutputMemPtr[i], refTopkOutput[i]);
+                failed = true;
+                break;
+            }
+        }
+        if (!failed) {
+            printf("Elementwise difference between TopK outputs and reference has not been found for Rank: %u!\n", flashmoe::hostBookkeeping.rank);
         }
 
         failed = false;

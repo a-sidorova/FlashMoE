@@ -306,6 +306,9 @@ namespace flashmoe::gate {
             const auto topK = cute::make_tensor(cute::make_smem_ptr(CAST_TO(TKT, gateScratch)), CSL{})
                 (cute::_, threadIdx.x);
             cuda::std::array<uint, bN> rTopK{};
+            // Per-token indices/values tracking
+            cuda::std::array<uint, ACC::TK::value> selectedIdx{};
+            cuda::std::array<ElementC, ACC::TK::value> selectedVal{};
             __syncthreads();
             #pragma unroll
             for (uint i = 0; i < bN; ++i) {
@@ -379,6 +382,10 @@ namespace flashmoe::gate {
                     }
                 }
 
+                // Save expert's index and value for current round
+                selectedIdx[i] = sIdx;
+                selectedVal[i] = sV;
+
                 if (sIdx / bN == cute::get<1>(tileCoord)) {
                     // Our proposal won in this round!
                     topK[sIdx % bN] = 1U;
@@ -393,6 +400,27 @@ namespace flashmoe::gate {
             #pragma unroll
             for(uint j = 0; j < bN; ++j) {
                 rTopK[j] = topK[j];
+            }
+
+            // Write TopK indices (as float) and values to the end of the common buffer.
+            if (cute::get<1>(tileCoord) == 0) {
+                using RouteElement = typename decltype(gC)::value_type;
+                const uint row = bM * cute::get<0>(tileCoord) + threadIdx.x;
+                // Compute base (global) pointer of routing buffer from current row pointer
+                auto* __restrict__ baseGatePtr =
+                    CAST_TO(char, &gC(threadIdx.x, 0)) -
+                    static_cast<size_t>(row) * static_cast<size_t>(ACC::PX::value) * sizeof(RouteElement);
+                const size_t prevBytes =
+                    static_cast<size_t>(ACC::S::value) * static_cast<size_t>(ACC::PX::value) * sizeof(RouteElement) +
+                    static_cast<size_t>(ACC::S::value) * static_cast<size_t>(ACC::H::value) * sizeof(RouteElement);
+                const size_t perRowBytes = static_cast<size_t>(2 * ACC::TK::value) * sizeof(ElementC);
+                auto* __restrict__ rowTopK =
+                    CAST_TO(ElementC, baseGatePtr + prevBytes + static_cast<size_t>(row) * perRowBytes);
+                #pragma unroll
+                for (uint i = 0; i < ACC::TK::value; ++i) {
+                    rowTopK[i] = static_cast<ElementC>(selectedIdx[i]);
+                    rowTopK[ACC::TK::value + i] = static_cast<ElementC>(selectedVal[i]);
+                }
             }
 
             // Copy results to global memory
@@ -644,6 +672,9 @@ namespace flashmoe::gate {
             const auto topK = cute::make_tensor(cute::make_smem_ptr(CAST_TO(TKT, gateScratch)), CSL{})
                 (cute::_, threadIdx.x);
             cutlass::AlignedArray<uint, abN> rTopK{};
+            // Per-token indices/values tracking
+            cuda::std::array<uint, k> selectedIdx{};
+            cuda::std::array<ElementC, k> selectedVal{};
             // Prior to reusing shared memory
             __syncthreads();
             #pragma unroll
@@ -667,11 +698,33 @@ namespace flashmoe::gate {
                 }
                 topK[sIdx] = 1U;
                 mCw += sV;
+                selectedIdx[i] = sIdx;
+                selectedVal[i] = sV;
             }
             // prefetch topK to registers, one last time :)
             #pragma unroll
             for(uint j = 0; j < abN; ++j) {
                 rTopK[j] = topK[j];
+            }
+            // Write TopK (indices as float, then values) at the end of the common buffer
+            {
+                using RouteElement = typename decltype(gC)::value_type;
+                const uint row = bM * cute::get<0>(tileCoord) + threadIdx.x;
+                // Convert current row pointer back to base-of-routing pointer by removing row*PX elements
+                auto* __restrict__ baseGatePtr =
+                    CAST_TO(char, &gC(threadIdx.x, 0)) -
+                    static_cast<size_t>(row) * static_cast<size_t>(ACC::PX::value) * sizeof(RouteElement);
+                const size_t prevBytes =
+                    static_cast<size_t>(ACC::S::value) * static_cast<size_t>(ACC::PX::value) * sizeof(RouteElement) +
+                    static_cast<size_t>(ACC::S::value) * static_cast<size_t>(ACC::H::value) * sizeof(RouteElement);
+                const size_t perRowBytes = static_cast<size_t>(2 * k) * sizeof(ElementC);
+                auto* __restrict__ rowTopK =
+                    CAST_TO(ElementC, baseGatePtr + prevBytes + static_cast<size_t>(row) * perRowBytes);
+                #pragma unroll
+                for (uint i = 0; i < k; ++i) {
+                    rowTopK[i] = static_cast<ElementC>(selectedIdx[i]);
+                    rowTopK[k + i] = static_cast<ElementC>(selectedVal[i]);
+                }
             }
             // needed for reusing shared memory
             __syncthreads();

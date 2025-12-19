@@ -191,6 +191,7 @@ namespace flashmoe {
                     const std::vector<float>& gateWeights,
                     const std::vector<float>& expertWeights,
                     std::vector<float>& gateOutput,
+                    std::vector<float>& topkOutput,
                     std::vector<float>& moeOutput,
                     size_t S) {
         // Gate
@@ -203,6 +204,14 @@ namespace flashmoe {
         constexpr size_t K = flashmoe::ACC::TK::value;
         std::vector<float> topk(S * K, 0);
         topK<PX, E, K>(gateOutput, topk, S);
+
+        // for debug purposes
+        for (size_t s = 0 ; s < S; ++s) {
+            for (size_t k = 0; k < K; ++k) {
+                topkOutput[s * 2 * K + k] = static_cast<float>(topk[s * K + k]);
+                topkOutput[s * 2 * K + K + k] = static_cast<float>(gateOutput[s * PX + topk[s * K + k]]);
+            }
+        }
 
         // Expert computation
         experts<H, P, PX, E>(activations, expertWeights, topk, gateOutput, moeOutput, S);

@@ -42,25 +42,28 @@ namespace flashmoe {
     }
 
     // Softmax along PX dimension for each token s
-    template<unsigned int PX>
+    template<
+        unsigned int PX,
+        unsigned int E
+    >
     void softmax(std::vector<float>& gateOutput, size_t S) {
         std::vector<float> gateSoftmax(gateOutput.size(), 0.0f);
 #pragma omp parallel for
         for (size_t s = 0; s < S; ++s) {
             // Find max for numerical stability
             float max_val = gateOutput[s * PX];
-            for (size_t px = 1; px < PX; ++px) {
-                max_val = std::max(max_val, gateOutput[s * PX + px]);
+            for (size_t e = 1; e < E; ++e) {
+                max_val = std::max(max_val, gateOutput[s * PX + e]);
             }
             // Compute exp and sum
             float exp_sum = 0.0f;
-            for (size_t px = 0; px < PX; ++px) {
-                gateSoftmax[s * PX + px] = std::exp(gateOutput[s * PX + px] - max_val);
-                exp_sum += gateSoftmax[s * PX + px];
+            for (size_t e = 0; e < E; ++e) {
+                gateSoftmax[s * PX + e] = std::exp(gateOutput[s * PX + e] - max_val);
+                exp_sum += gateSoftmax[s * PX + e];
             }
             // Normalize
-            for (size_t px = 0; px < PX; ++px) {
-                gateSoftmax[s * PX + px] /= exp_sum;
+            for (size_t e = 0; e < E; ++e) {
+                gateSoftmax[s * PX + e] /= exp_sum;
             }
         }
         gateOutput = gateSoftmax;
@@ -68,21 +71,22 @@ namespace flashmoe {
 
     template<
         unsigned int PX,
+        unsigned int E,
         unsigned int K
     >
     void topK(const std::vector<float>& softmax, std::vector<float>& topk, size_t S) {
         for (size_t s = 0; s < S; ++s) {
-            std::vector<std::pair<float, size_t>> px_scores;
-            for (size_t px = 0; px < PX; ++px) {
-                px_scores.emplace_back(softmax[s * PX + px], px);
+            std::vector<std::pair<float, size_t>> e_scores;
+            for (size_t e = 0; e < E; ++e) {
+                e_scores.emplace_back(softmax[s * PX + e], e);
             }
             std::sort(
-                px_scores.begin(),
-                px_scores.end(),
+                e_scores.begin(),
+                e_scores.end(),
                 [](const auto& a, const auto& b) { return a.first > b.first; }
             );
             for (size_t k = 0; k < K; ++k) {
-                topk[s * K + k] = px_scores[k].second;
+                topk[s * K + k] = e_scores[k].second;
             }
         }
     }
@@ -189,12 +193,12 @@ namespace flashmoe {
         matmul<H, PX>(activations.data(), gateWeights.data(), gateOutput.data(), S, true);
 
         // Softmax
-        softmax<PX>(gateOutput, S);
+        softmax<PX, E>(gateOutput, S);
 
         // topK
         constexpr size_t K = flashmoe::ACC::TK::value;
         std::vector<float> topk(S * K, 0);
-        topK<PX, K>(gateOutput, topk, S);
+        topK<PX, E, K>(gateOutput, topk, S);
 
         // Expert computation
         experts<H, P, PX, E>(activations, expertWeights, topk, gateOutput, moeOutput, S);

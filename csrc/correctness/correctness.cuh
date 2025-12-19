@@ -164,14 +164,18 @@ namespace flashmoe {
             // Scatter back with gate probability weighting
             for (size_t i = 0; i < tokenCount; ++i) {
                 const auto tokenIdx = expertTokens[e][i];
-                // `probs` has stride PX (padded expert dim). Using K here indexes
-                // into the next token's probabilities once K < PX.
-                const float gateProb = probs[tokenIdx * PX + e];
-                if (gateProb == 0.0f) {
-                    continue;
-                }
-                for (size_t h = 0; h < H; ++h) {
-                    moeOutput[tokenIdx * H + h] += gateProb * expertOut[i * H + h];
+                if (K > 1) {
+                    const float gateProb = probs[tokenIdx * PX + e];
+                    if (gateProb == 0.0f) {
+                        continue;
+                    }
+                    for (size_t h = 0; h < H; ++h) {
+                        moeOutput[tokenIdx * H + h] += gateProb * expertOut[i * H + h];
+                    }
+                } else {
+                    for (size_t h = 0; h < H; ++h) {
+                        moeOutput[tokenIdx * H + h] = expertOut[i * H + h];
+                    }
                 }
             }
         }

@@ -5,8 +5,59 @@
 #include <thrust/generate.h>
 #include <thrust/random.h>
 
+#include <fstream>
+
 #include "../include/flashmoe/flashmoe.cuh"
 #include "../correctness/correctness.cuh"
+
+__host__ void saveMatrixToFile(const float* data,
+    size_t rows,
+    size_t cols,
+    const std::string& bufferName,
+    unsigned int rank) {
+    const std::string filename = bufferName + "_rank" + std::to_string(rank) + ".txt";
+    std::ofstream out(filename, std::ios::out | std::ios::trunc);
+    if (!out.good()) {
+        return;
+    }
+    out.setf(std::ios::fixed);
+    out << std::setprecision(3);
+    out << std::right;
+
+    {
+        std::ostringstream moeInfo;
+        moeInfo << "rank=" << rank << "\n"
+                  << "S=" << flashmoe::ACC::S::value << "\n"
+                  << "H=" << flashmoe::ACC::H::value << "\n"
+                  << "E=" << flashmoe::ACC::E::value << "\n"
+                  << "P=" << flashmoe::ACC::P::value << "\n"
+                  << "PX=" << flashmoe::ACC::PX::value << " (ceil_div(E, BLOCK_N) * BLOCK_N))\n"
+                  << "nLx=" << flashmoe::hostBookkeeping.nLx << "\n"
+                  << "matrix=" << bufferName << "\n"
+                  << "shape=" << rows << "x" << cols << "\n";
+        out << moeInfo.str() << "\n";
+    }
+
+    for (size_t c = 0; c < cols; ++c) {
+        out << std::setw(6) << c;
+        if (c + 1 < cols) {
+            out << ' ';
+        }
+    }
+    out << "\n";
+
+    for (size_t r = 0; r < rows; ++r) {
+        const size_t rowOffset = r * cols;
+        for (size_t c = 0; c < cols; ++c) {
+            out << std::setw(6) << data[rowOffset + c];
+            if (c + 1 < cols) {
+                out << ' ';
+            }
+        }
+        out << "\n";
+    }
+    std::cout << "Saved to " << filename << "\n";
+}
 
 __host__ __forceinline__
 void runOS() {
@@ -166,7 +217,7 @@ int main() {
         cudaMemcpyHostToDevice,
         flashmoe::flashmoeStream));
 
-        printf("Forward for Rank: %u \n", flashmoe::hostBookkeeping.rank);
+        printf("Forward for Rank: %u with local experts: %u\n", flashmoe::hostBookkeeping.rank, nLx);
         flashmoe::moe::forwardHost(p, p + dZ * sizeof(Element));
 
         FLASHMOE_CHECK_CUDA(cudaStreamSynchronize(flashmoe::flashmoeStream));
@@ -174,6 +225,11 @@ int main() {
             cudaMemcpyDeviceToHost));
         FLASHMOE_CHECK_CUDA(cudaMemcpy(fMoeOutputMemPtr, p + gZ * sizeof(Element), moeOutputSize * sizeof(float),
             cudaMemcpyDeviceToHost));
+
+        printf("Output Gate for epRank %u : %f %f %f %f %f \n", flashmoe::hostBookkeeping.rank,
+            fGateOutputMemPtr[0], fGateOutputMemPtr[1], fGateOutputMemPtr[2], fGateOutputMemPtr[3], fGateOutputMemPtr[4]);
+        printf("Output MoE for epRank %u : %f %f %f %f %f \n", flashmoe::hostBookkeeping.rank,
+                fMoeOutputMemPtr[0], fMoeOutputMemPtr[1], fMoeOutputMemPtr[2], fMoeOutputMemPtr[3], fMoeOutputMemPtr[4]);
     }
 
     printf("===== FlashMoE reference execution =====\n");
@@ -187,6 +243,11 @@ int main() {
 
         printf("Forward for Rank: %u \n", flashmoe::hostBookkeeping.rank);
         flashmoe::forwardCPU<H, P, PX, E>(activations, gateWeights, expertWeights, refGateOutput, refMoeOutput, S);
+
+        printf("Output Gate for epRank %u : %f %f %f %f %f \n", flashmoe::hostBookkeeping.rank,
+            refGateOutput[0], refGateOutput[1], refGateOutput[2], refGateOutput[3], refGateOutput[4]);
+        printf("Output MoE for epRank %u : %f %f %f %f %f \n", flashmoe::hostBookkeeping.rank,
+            refMoeOutput[0], refMoeOutput[1], refMoeOutput[2], refMoeOutput[3], refMoeOutput[4]);
     }
 
     printf("===== Validation =====\n");

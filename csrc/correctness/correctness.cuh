@@ -165,12 +165,18 @@ namespace flashmoe {
             for (size_t i = 0; i < tokenCount; ++i) {
                 const auto tokenIdx = expertTokens[e][i];
                 if (K > 1) {
-                    const float gateProb = probs[tokenIdx * PX + e];
-                    if (gateProb == 0.0f) {
+                    float prob = 0;
+                    for (size_t k = 0; k < K; ++k) {
+                        prob += probs[tokenIdx * PX + topk[tokenIdx * K + k]];
+                    }
+
+                    prob = 1;
+                    const float scale = probs[tokenIdx * PX + e];
+                    if (scale == 0.0f) {
                         continue;
                     }
                     for (size_t h = 0; h < H; ++h) {
-                        moeOutput[tokenIdx * H + h] += gateProb * expertOut[i * H + h];
+                        moeOutput[tokenIdx * H + h] += scale * (expertOut[i * H + h] / prob);
                     }
                 } else {
                     for (size_t h = 0; h < H; ++h) {

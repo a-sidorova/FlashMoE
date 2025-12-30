@@ -170,7 +170,6 @@ namespace flashmoe {
                         prob += probs[tokenIdx * PX + topk[tokenIdx * K + k]];
                     }
 
-                    prob = 1;
                     const float scale = probs[tokenIdx * PX + e];
                     if (scale == 0.0f) {
                         continue;
